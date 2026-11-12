@@ -1,0 +1,29 @@
+name: Validate installer
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  static-and-regression:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install validation tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck python3
+      - name: Check Bash syntax and ShellCheck
+        run: |
+          bash -n install.sh
+          bash -n tests/test-installer.sh
+          shellcheck install.sh tests/test-installer.sh
+      - name: Run isolated regression tests
+        run: bash tests/test-installer.sh
+      - name: Check embedded Python syntax
+        run: |
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          source = Path('install.sh').read_text()
+          for index, code in enumerate(re.findall(r"<<'PY'\n(.*?)\nPY", source, re.S)):
+              compile(code, f'embedded-{index}', 'exec')
+          PY

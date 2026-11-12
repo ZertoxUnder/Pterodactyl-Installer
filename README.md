@@ -9,6 +9,8 @@ Installateur Bash interactif pour **Pterodactyl Panel 1.x et Wings**.
 - Panel seul, Wings seul ou les deux, avec installation des dépendances.
 - Nginx ou Apache, domaine ou IPv4, SSL optionnel.
 - Liaison automatique Panel/Wings, SMTP et UFW en option.
+- Mode rapide par défaut : peu de questions et mots de passe générés.
+- MariaDB dédiée aux bases des jeux, ajoutée automatiquement au Panel en option.
 - Reprise après interruption, logs et diagnostics privés.
 
 ## Installation
@@ -27,7 +29,15 @@ Si `curl` manque :
 apt-get update && apt-get install -y curl ca-certificates
 ```
 
-Répondez au menu. Sans domaine, saisissez votre IPv4 et choisissez le mode sans SSL : le Panel sera accessible sur `http://VOTRE_IP`.
+Choisissez le mode rapide : adresse, email et confirmations principales suffisent pour Panel + Wings. Nginx, le compte `admin`, les mots de passe et les ressources sont configurés automatiquement. Avec une IPv4, le Panel sera accessible sur `http://VOTRE_IP`, sans SSL. Le mode avancé conserve tous les réglages.
+
+L’option **4** prépare les DB des jeux sur une machine avec Panel + Wings déjà configurés. Accès direct :
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/ZertoxUnder/Pterodactyl-Installer/main/install.sh) --configure-databases
+```
+
+Elle crée une instance MariaDB Docker séparée, un volume persistant et un hôte DB dans le Panel. Le port 3307 est lié à la passerelle privée du réseau Wings. Attribuez ensuite une limite de bases supérieure à 0 à vos serveurs dans le Panel.
 
 ## Reprendre une installation
 

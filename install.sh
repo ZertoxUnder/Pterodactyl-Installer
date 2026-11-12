@@ -34,6 +34,7 @@ LOG='' CREDENTIALS=''
 STATE_DIR=/var/lib/pterodactyl-installer
 DIAGNOSTICS='' INSTALL_OS=''
 APT_REFRESHED=0
+QUICK_MODE=1 GAME_DB_ENABLED=0 DB_ONLY=0
 RED=$'\033[31m' GREEN=$'\033[32m' BLUE=$'\033[36m' RESET=$'\033[0m'
 
 info() { printf '%s[INFO]%s %s\n' "$BLUE" "$RESET" "$*"; }
@@ -46,7 +47,7 @@ cleanup() {
     repair_panel_runtime_permissions || true
     if (( status != 0 )) && [[ -n $DIAGNOSTICS && -n $TMP && -d $TMP ]]; then
         local diagnostic
-        for diagnostic in sql-output admin-output; do
+        for diagnostic in sql-output admin-output game-db-output; do
             if [[ -f $TMP/$diagnostic ]]; then
                 cp -- "$TMP/$diagnostic" "$DIAGNOSTICS/$diagnostic.log" || true
                 chmod 600 "$DIAGNOSTICS/$diagnostic.log" || true
@@ -55,7 +56,7 @@ cleanup() {
         printf 'Diagnostics privés : %s\n' "$DIAGNOSTICS" >&2
     fi
     if [[ -n $TMP && $TMP == /tmp/ptero-install.* ]]; then rm -rf -- "$TMP"; fi
-    unset DB_PASSWORD ADMIN_PASSWORD SMTP_PASSWORD APPLICATION_KEY
+    unset DB_PASSWORD ADMIN_PASSWORD SMTP_PASSWORD APPLICATION_KEY GAME_DB_PASSWORD
     if (( status != 0 )); then
         printf '\nArrêt à l’étape : %s. Journal : %s\n' "$STAGE" "${LOG:-non initialisé}" >&2
         if [[ -z $LOG ]]; then
@@ -169,8 +170,13 @@ apt_install() {
     apt-get -o Acquire::Retries=3 -o DPkg::Lock::Timeout=120 install -y --no-install-recommends "$@"
 }
 
+composer_run() {
+    COMPOSER_ALLOW_SUPERUSER=1 COMPOSER_NO_INTERACTION=1 \
+        "$PHP_BIN" /usr/local/bin/composer --no-interaction "$@"
+}
+
 repair_panel_runtime_permissions() {
-    if (( PANEL )) && [[ -f $STATE_DIR/panel-files.done ]]; then
+    if (( PANEL )) && { [[ -f $STATE_DIR/panel-files.done ]] || (( DB_ONLY )); }; then
         local path
         for path in "$PANEL_DIR/storage" "$PANEL_DIR/bootstrap/cache"; do
             [[ -d $path ]] || continue
@@ -197,7 +203,7 @@ docker_smoke_test() {
 
 state_save() {
     local name
-    local -a names=(INSTALL_OS PANEL WINGS FIREWALL AUTO_LINK PANEL_DOMAIN WINGS_DOMAIN PANEL_URL WEB SSL
+    local -a names=(INSTALL_OS PANEL WINGS FIREWALL AUTO_LINK QUICK_MODE GAME_DB_ENABLED PANEL_DOMAIN WINGS_DOMAIN PANEL_URL WEB SSL
         PANEL_CERT PANEL_KEY WINGS_CERT WINGS_KEY LE_EMAIL SSH_PORT TIMEZONE
         DB_PASSWORD ADMIN_PASSWORD ADMIN_EMAIL ADMIN_USER ADMIN_FIRST ADMIN_LAST
         MAIL_MAILER SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASSWORD SMTP_ENCRYPTION SMTP_FROM SMTP_NAME
@@ -283,13 +289,72 @@ preflight() {
     info "OS détecté : $PRETTY_NAME ; PHP $PHP_VERSION ($PHP_REPOSITORY) ; journal root : $LOG"
 }
 
+questions_quick() {
+    WEB=nginx FIREWALL=0 TIMEZONE=Europe/Paris
+    ADMIN_USER=admin ADMIN_FIRST=Admin ADMIN_LAST=Pterodactyl
+    DB_PASSWORD='' ADMIN_PASSWORD=''
+    SMTP_HOST='' SMTP_PORT=587 SMTP_USER='' SMTP_PASSWORD='' SMTP_ENCRYPTION=tls
+    SMTP_NAME=Pterodactyl MAIL_MAILER=log
+    if (( PANEL )); then
+        address PANEL_DOMAIN 'Adresse du Panel'
+        email ADMIN_EMAIL 'Email administrateur'
+        SMTP_FROM=$ADMIN_EMAIL
+        LE_EMAIL=$ADMIN_EMAIL
+        if (( WINGS )); then WINGS_DOMAIN=$PANEL_DOMAIN; fi
+    else
+        address WINGS_DOMAIN 'Adresse de Wings'
+        address PANEL_DOMAIN 'Adresse du Panel distant'
+    fi
+    local local_address=$PANEL_DOMAIN
+    if (( PANEL == 0 )); then local_address=$WINGS_DOMAIN; fi
+    SSL=le
+    if is_ipv4 "$local_address"; then SSL=none; fi
+    if (( PANEL )); then
+        PANEL_URL="http://$PANEL_DOMAIN"
+        [[ $SSL == none ]] || PANEL_URL="https://$PANEL_DOMAIN"
+    else
+        local https_default=o
+        if is_ipv4 "$PANEL_DOMAIN"; then https_default=n; fi
+        if yesno 'Le Panel distant utilise HTTPS' "$https_default"; then
+            PANEL_URL="https://$PANEL_DOMAIN"
+            [[ $SSL != none ]] || die 'Panel HTTPS : utiliser le mode avancé pour fournir un certificat Wings couvrant cette IP.'
+        else PANEL_URL="http://$PANEL_DOMAIN"; fi
+        if [[ $SSL == le ]]; then email LE_EMAIL 'Email Let’s Encrypt'; fi
+    fi
+    AUTO_LINK=0
+    if (( WINGS )); then
+        NODE_NAME=Node-1 LOCATION_SHORT=local
+        detect_resources
+        NODE_MEMORY=$DEFAULT_NODE_MEMORY NODE_DISK=$DEFAULT_NODE_DISK
+        if (( PANEL )); then
+            AUTO_LINK=1
+            if yesno 'Préparer aussi MariaDB pour les bases des jeux' o; then GAME_DB_ENABLED=1; fi
+        elif [[ $PANEL_URL == https://* ]]; then
+            secret APPLICATION_KEY 'Clé Application API (vide = collage manuel du YAML)'
+            if [[ -n $APPLICATION_KEY ]]; then AUTO_LINK=1; fi
+        fi
+    fi
+    info "Mode rapide : Nginx, admin, mots de passe générés, fuseau $TIMEZONE, SMTP et UFW inchangés."
+    info "Panel : $PANEL_URL ; SSL : $SSL ; DB jeux : $GAME_DB_ENABLED."
+    if [[ $SSL == le ]]; then
+        info 'Le DNS doit pointer vers ce serveur et le port 80 être accessible.'
+        yesno 'Installer et accepter les conditions Let’s Encrypt https://letsencrypt.org/repository/' o || exit 0
+    else
+        yesno 'Lancer l’installation avec ces paramètres' o || exit 0
+    fi
+}
+
 questions() {
     STAGE=questionnaire
     local choice username confirm ssh_default ssl_default=1 link_available=1 panel_https_default=o
-    printf '\n1) Panel uniquement\n2) Wings uniquement\n3) Panel + Wings\n0) Quitter\n'
+    printf '\n1) Panel uniquement\n2) Wings uniquement\n3) Panel + Wings\n4) Configurer MariaDB pour les jeux (Panel + Wings déjà installés ici)\n0) Quitter\n'
     while true; do
         ask choice 'Installation souhaitée'
-        case "$choice" in 1) PANEL=1; break;; 2) WINGS=1; break;; 3) PANEL=1; WINGS=1; break;; 0) exit 0;; esac
+        case "$choice" in 1) PANEL=1; break;; 2) WINGS=1; break;; 3) PANEL=1; WINGS=1; break;; 4) DB_ONLY=1; return 0;; 0) exit 0;; esac
+    done
+    while true; do
+        ask choice 'Configuration : 1=rapide (recommandé), 2=avancée' 1
+        case "$choice" in 1) QUICK_MODE=1; questions_quick; return 0;; 2) QUICK_MODE=0; break;; esac
     done
     (( PANEL == 0 )) || address PANEL_DOMAIN 'Adresse du Panel'
     if (( WINGS )); then
@@ -407,6 +472,9 @@ questions() {
         ssh_default=22
         if [[ -n ${SSH_CONNECTION:-} ]]; then ssh_default=${SSH_CONNECTION##* }; fi
         port SSH_PORT 'Port SSH réel à préserver (vérifiez aussi les autres ports SSH)' "$ssh_default"
+    fi
+    if (( PANEL && WINGS )); then
+        if yesno 'Préparer aussi MariaDB pour les bases des jeux' o; then GAME_DB_ENABLED=1; fi
     fi
     printf '\nOS : %s ; Panel : %s ; Wings : %s ; web : %s ; SSL : %s\n' "$PRETTY_NAME" "$PANEL" "$WINGS" "${WEB:-aucun}" "$SSL"
     info 'Les ports 80/443 (web), 8080 (Wings API) et 2022 (SFTP) seront utilisés selon le mode.'
@@ -671,8 +739,8 @@ PY
     mark_done panel-env
     fi
     unset DB_PASSWORD SMTP_PASSWORD
-    COMPOSER_ALLOW_SUPERUSER=1 "$PHP_BIN" /usr/local/bin/composer install --no-dev --optimize-autoloader --no-interaction
-    "$PHP_BIN" /usr/local/bin/composer check-platform-reqs --no-dev
+    composer_run install --no-dev --optimize-autoloader
+    composer_run check-platform-reqs --no-dev
     if ! grep -Eq '^APP_KEY="?base64:[A-Za-z0-9+/=]+' .env; then
         [[ ! -f $STATE_DIR/panel.env.backup ]] || die 'APP_KEY absente ou modifiée : restaurer la copie privée panel.env.backup, ne pas régénérer la clé.'
         "$PHP_BIN" artisan key:generate --force --no-interaction
@@ -874,6 +942,117 @@ DOCKER
     systemctl enable --now docker
     docker info >/dev/null
     docker_smoke_test
+}
+
+# Instance MariaDB dédiée aux jeux : volume persistant et port 3307 lié
+# uniquement à la passerelle privée du réseau Docker de Wings. La base du
+# Panel, sur MariaDB système/3306, conserve sa configuration et ses comptes.
+configure_game_databases() {
+    STAGE='configuration MariaDB des jeux'
+    [[ -f $PANEL_DIR/artisan && -f /etc/pterodactyl/config.yml ]] || die 'Installer le Panel et configurer Wings sur cette machine avant l’option DB.'
+    PANEL=1
+    command -v docker >/dev/null || die 'Docker doit être installé sur cette machine.'
+    PHP_BIN="/usr/bin/php$PHP_VERSION"
+    [[ -x $PHP_BIN ]] || die "PHP $PHP_VERSION introuvable pour le Panel local."
+    docker info >/dev/null
+    apt_update
+    apt_install python3-yaml openssl
+    local metadata
+    metadata=$(python3 - <<'PY'
+import re, uuid, yaml
+from pathlib import Path
+c = yaml.safe_load(Path('/etc/pterodactyl/config.yml').read_text())
+network = c.get('docker', {}).get('network', {}).get('name', 'pterodactyl_nw')
+assert re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,62}', network), 'Nom du réseau Docker invalide'
+print(network, uuid.UUID(c['uuid']))
+PY
+)
+    read -r GAME_DB_NETWORK GAME_DB_NODE_UUID <<< "$metadata"
+    docker network inspect "$GAME_DB_NETWORK" > "$TMP/game-network.json"
+    GAME_DB_GATEWAY=$(python3 - "$TMP/game-network.json" <<'PY'
+import ipaddress, json, sys
+n = json.load(open(sys.argv[1]))[0]
+assert n['Driver'] == 'bridge', 'L’option DB nécessite le réseau bridge de Wings'
+gateways = [ipaddress.ip_address(x['Gateway']) for x in n['IPAM']['Config'] if x.get('Gateway')]
+gateway = next(x for x in gateways if x.version == 4 and x.is_private and not x.is_loopback)
+print(gateway)
+PY
+)
+    local container=ptero-installer-game-db volume=ptero-installer-game-db
+    local envfile=$STATE_DIR/game-db.env root_password='' key value attempt ready=0
+    if [[ ! -e $envfile ]]; then
+        {
+            printf 'MARIADB_ROOT_PASSWORD=%s\n' "$(openssl rand -hex 32)"
+            printf 'MARIADB_ROOT_HOST=localhost\n'
+            printf 'GAME_DB_PASSWORD=%s\n' "$(openssl rand -hex 32)"
+        } > "$envfile.new"
+        chmod 600 "$envfile.new"
+        mv "$envfile.new" "$envfile"
+    fi
+    [[ ! -L $envfile && $(stat -c %a "$envfile") == 600 && $(stat -c %u "$envfile") == 0 ]] || die 'Fichier des identifiants DB non sûr.'
+    while IFS='=' read -r key value; do
+        case "$key" in GAME_DB_PASSWORD) GAME_DB_PASSWORD=$value;; MARIADB_ROOT_PASSWORD) root_password=$value;; esac
+    done < "$envfile"
+    [[ ${GAME_DB_PASSWORD:-} =~ ^[a-f0-9]{64}$ && $root_password =~ ^[a-f0-9]{64}$ ]] || die 'Identifiants DB absents ou invalides.'
+    unset root_password
+    if docker volume inspect "$volume" >/dev/null 2>&1; then
+        [[ $(docker volume inspect --format '{{index .Labels "io.ptero-installer.managed"}}' "$volume") == game-db ]] || die 'Un volume DB étranger porte déjà ce nom.'
+    else
+        docker volume create --label io.ptero-installer.managed=game-db "$volume" >/dev/null
+    fi
+    if docker container inspect "$container" >/dev/null 2>&1; then
+        [[ $(docker inspect --format '{{index .Config.Labels "io.ptero-installer.managed"}}' "$container") == game-db ]] || die 'Un conteneur étranger porte déjà ce nom.'
+        [[ $(docker inspect --format '{{index .Config.Labels "io.ptero-installer.gateway"}}' "$container") == "$GAME_DB_GATEWAY" ]] || die 'Le réseau Wings a changé ; vérifier le conteneur DB existant.'
+        docker start "$container" >/dev/null
+    else
+        if [[ -n $(ss -H -ltn 'sport = :3307') ]]; then die 'Le port TCP 3307 est déjà occupé.'; fi
+        docker run -d --name "$container" --restart unless-stopped \
+            --label io.ptero-installer.managed=game-db --label "io.ptero-installer.gateway=$GAME_DB_GATEWAY" \
+            --env-file "$envfile" --network "$GAME_DB_NETWORK" \
+            --publish "$GAME_DB_GATEWAY:3307:3306/tcp" --volume "$volume:/var/lib/mysql" \
+            mariadb:11.4 >/dev/null
+    fi
+    for attempt in {1..30}; do
+        if docker exec "$container" healthcheck.sh --connect --innodb_initialized >/dev/null 2>&1; then ready=1; break; fi
+        if (( attempt % 10 == 0 )); then info 'Initialisation de MariaDB jeux en cours…'; fi
+        sleep 2
+    done
+    (( ready )) || die 'MariaDB jeux ne répond pas ; consulter docker logs ptero-installer-game-db.'
+    # Compte de gestion privilégié limité à cette instance dédiée, jamais à
+    # l'instance SQL du Panel. Mot de passe hexadécimal validé, envoyé sur stdin.
+    docker exec -i "$container" sh -c 'MYSQL_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb -uroot' > "$TMP/game-db-output" 2>&1 <<SQL
+CREATE USER IF NOT EXISTS 'ptero_games'@'%' IDENTIFIED BY '$GAME_DB_PASSWORD';
+ALTER USER 'ptero_games'@'%' IDENTIFIED BY '$GAME_DB_PASSWORD';
+GRANT ALL PRIVILEGES ON *.* TO 'ptero_games'@'%' WITH GRANT OPTION;
+SQL
+    export GAME_DB_GATEWAY GAME_DB_NODE_UUID GAME_DB_PASSWORD
+    (
+        cd "$PANEL_DIR"
+        "$PHP_BIN" >> "$TMP/game-db-output" 2>&1 <<'PHP'
+<?php
+require 'vendor/autoload.php';
+$app = require 'bootstrap/app.php';
+$app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+$node = Pterodactyl\Models\Node::where('uuid', getenv('GAME_DB_NODE_UUID'))->firstOrFail();
+$host = Pterodactyl\Models\DatabaseHost::where('host', getenv('GAME_DB_GATEWAY'))->where('port', 3307)->first();
+if ($host) {
+    if ($host->username !== 'ptero_games' || $host->node_id !== $node->id ||
+        $app->make(Illuminate\Contracts\Encryption\Encrypter::class)->decrypt($host->password) !== getenv('GAME_DB_PASSWORD')) {
+        throw new RuntimeException('Hôte DB existant différent : arrêt sans modification.');
+    }
+} else {
+    $app->make(Pterodactyl\Services\Databases\Hosts\HostCreationService::class)->handle([
+        'name' => 'MariaDB jeux - ' . $node->name, 'host' => getenv('GAME_DB_GATEWAY'), 'port' => 3307,
+        'username' => 'ptero_games', 'password' => getenv('GAME_DB_PASSWORD'), 'node_id' => $node->id,
+    ]);
+}
+PHP
+    )
+    unset GAME_DB_PASSWORD
+    repair_panel_runtime_permissions
+    touch "$STATE_DIR/game-db.done"
+    ok "MariaDB jeux ajoutée au Panel : $GAME_DB_GATEWAY:3307. Volume : $volume."
+    info 'Dans le Panel, attribuer une limite de bases supérieure à 0 au serveur, puis utiliser son onglet Databases.'
 }
 
 link_local_panel() {
@@ -1136,6 +1315,7 @@ summary() {
     STAGE=terminé
     printf '\n========== Installation terminée ==========\n'
     printf 'OS : %s\nJournal : %s\n' "$PRETTY_NAME" "$LOG"
+    printf 'Configuration rapide : %s ; DB jeux demandée : %s\n' "$QUICK_MODE" "$GAME_DB_ENABLED"
     printf 'État de l’installation et diagnostics privés : %s\n' "$STATE_DIR"
     printf 'Les versions sélectionnées sont conservées pour les reprises ; ce script ne met pas à jour une installation terminée.\n'
     if (( PANEL )); then
@@ -1177,25 +1357,35 @@ summary() {
 }
 
 main() {
+    local action=1
     case "${1:-}" in
-        --help|-h) printf 'Usage : sudo bash install.sh [--resume]\n'; return 0;;
+        --help|-h) printf 'Usage : sudo bash install.sh [--resume|--configure-databases]\n'; return 0;;
         ''|--resume) ;;
+        --configure-databases) DB_ONLY=1;;
         *) die 'Option inconnue. Utiliser --help.';;
     esac
     preflight
     if [[ -f $STATE_DIR/settings ]]; then
         [[ ! -L $STATE_DIR/settings && $(stat -c %u "$STATE_DIR/settings") == 0 && $(stat -c %a "$STATE_DIR/settings") == 600 ]] || die 'Fichier d’état non sûr.'
         if [[ ${1:-} != --resume ]]; then
-            yesno 'Une installation est enregistrée. Reprendre avec les mêmes paramètres' o || return 0
+            if (( DB_ONLY == 0 )); then
+                while true; do
+                    ask action 'Installation enregistrée : 1=reprendre/résumé, 4=configurer les DB des jeux, 0=quitter' 1
+                    case "$action" in 1) break;; 4) DB_ONLY=1; break;; 0) return 0;; esac
+                done
+            fi
         fi
         # shellcheck source=/dev/null
         . "$STATE_DIR/settings"
         [[ $INSTALL_OS == "$ID:$OS_CODENAME" ]] || die 'L’OS diffère de celui de l’installation enregistrée.'
+        if (( DB_ONLY )); then configure_game_databases; return 0; fi
         info "Reprise : Panel $PANEL_TAG ; Wings $WINGS_TAG ; $PANEL_URL"
         if [[ -f $STATE_DIR/complete.done ]]; then summary; return 0; fi
     else
         [[ ${1:-} != --resume ]] || die 'Aucun état de reprise trouvé pour cette version du script.'
+        if (( DB_ONLY )); then PANEL=1; configure_game_databases; return 0; fi
         questions
+        if (( DB_ONLY )); then PANEL=1; configure_game_databases; return 0; fi
         base_packages
         if (( PANEL )); then release panel "${PANEL_VERSION:-}" PANEL_TAG; fi
         if (( WINGS )); then release wings "${WINGS_VERSION:-}" WINGS_TAG; fi
@@ -1218,6 +1408,7 @@ main() {
         fi
         run_step wings-install wings_install
     fi
+    if (( GAME_DB_ENABLED )) && [[ ! -f $STATE_DIR/game-db.done ]]; then configure_game_databases; fi
     repair_panel_runtime_permissions
     verify
     unset DB_PASSWORD ADMIN_PASSWORD SMTP_PASSWORD APPLICATION_KEY
