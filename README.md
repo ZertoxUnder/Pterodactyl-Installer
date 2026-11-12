@@ -43,6 +43,22 @@ Le script refuse de remplacer une installation préexistante. Il ne permet pas d
 
 ## Installation
 
+### Installation rapide avec curl
+
+Depuis un terminal Bash connecté en **root** :
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/ZertoxUnder/Pterodactyl-Installer/main/install.sh)
+```
+
+Si `curl` n’est pas installé, préparez-le d’abord :
+
+```bash
+apt-get update && apt-get install -y curl ca-certificates
+```
+
+### Installation depuis un fichier
+
 Téléchargez [`install.sh`](install.sh) depuis ce dépôt, puis transférez-le sur votre serveur. Depuis le dossier contenant le fichier :
 
 ```bash
@@ -95,6 +111,14 @@ La clé API est saisie de manière masquée et n’est pas enregistrée dans l�
 Le collage manuel de la configuration reste disponible. Si vous le reportez, Wings reste arrêté jusqu’à sa configuration et son démarrage manuel.
 
 ## Reprise après interruption
+
+Avec la commande curl, depuis un terminal Bash connecté en root :
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/ZertoxUnder/Pterodactyl-Installer/main/install.sh) --resume
+```
+
+Avec le fichier téléchargé :
 
 ```bash
 sudo bash install.sh --resume
