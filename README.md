@@ -13,6 +13,7 @@ Installateur Bash interactif pour **Pterodactyl Panel 1.x et Wings**.
 - MariaDB dédiée aux bases des jeux, ajoutée automatiquement au Panel en option.
 - Ports prédéfinis et allocations automatiques : Minecraft, GMod/Source, Rust, FiveM, Valheim, Terraria, Factorio, Zomboid et ARK.
 - Reprise après interruption, logs et diagnostics privés.
+- Interface terminal colorée, étapes lisibles et journaux sans codes ANSI (`NO_COLOR` pris en charge).
 
 ## Installation
 
@@ -31,6 +32,8 @@ apt-get update && apt-get install -y curl ca-certificates
 ```
 
 Choisissez le mode rapide : adresse, email et confirmations principales suffisent pour Panel + Wings. Nginx, le compte `admin`, les mots de passe et les ressources sont configurés automatiquement. Avec une IPv4, le Panel sera accessible sur `http://VOTRE_IP`, sans SSL. Le mode avancé conserve tous les réglages.
+
+Pour voir l’interface sans rien installer, ajoutez `--preview` à la commande curl.
 
 L’option **4** prépare les DB des jeux sur une machine avec Panel + Wings déjà configurés. Accès direct :
 

@@ -37,11 +37,83 @@ APT_REFRESHED=0
 QUICK_MODE=1 GAME_DB_ENABLED=0 DB_ONLY=0
 GAME_PORTS=all PORTS_ONLY=0 ALLOCATION_IP=${ALLOCATION_IP:-}
 GAME_DB_MIGRATING=0
-RED=$'\033[31m' GREEN=$'\033[32m' BLUE=$'\033[36m' RESET=$'\033[0m'
+RED='' GREEN='' BLUE='' YELLOW='' PURPLE='' BOLD='' DIM='' RESET=''
+UI_WIDTH=68
 
-info() { printf '%s[INFO]%s %s\n' "$BLUE" "$RESET" "$*"; }
-ok() { printf '%s[OK]%s %s\n' "$GREEN" "$RESET" "$*"; }
-die() { printf '%s[ERREUR]%s %s\n' "$RED" "$RESET" "$*" >&2; exit 1; }
+# Interface sans dépendance : couleurs sur terminal, NO_COLOR respecté.
+# FORCE_COLOR=1 permet une prévisualisation ; aucun curseur/spinner ne pollue les logs.
+ui_init() {
+    RED='' GREEN='' BLUE='' YELLOW='' PURPLE='' BOLD='' DIM='' RESET=''
+    if [[ -z ${NO_COLOR:-} && ${TERM:-dumb} != dumb ]] && { [[ -t 1 ]] || [[ ${FORCE_COLOR:-0} == 1 ]]; }; then
+        RED=$'\033[31m' GREEN=$'\033[32m' BLUE=$'\033[36m' YELLOW=$'\033[33m' PURPLE=$'\033[35m'
+        if [[ ${TERM:-} == *256color* ]]; then
+            RED=$'\033[38;5;203m' GREEN=$'\033[38;5;84m' BLUE=$'\033[38;5;81m'
+            YELLOW=$'\033[38;5;221m' PURPLE=$'\033[38;5;141m'
+        fi
+        BOLD=$'\033[1m' DIM=$'\033[2m' RESET=$'\033[0m'
+    fi
+    UI_WIDTH=68
+    if [[ ${COLUMNS:-} =~ ^[0-9]{1,3}$ ]]; then
+        UI_WIDTH=$((10#$COLUMNS - 2))
+        if (( UI_WIDTH < 48 )); then UI_WIDTH=48; fi
+        if (( UI_WIDTH > 84 )); then UI_WIDTH=84; fi
+    fi
+}
+ui_plain_logs() { sed -u $'s/\033\\[[0-9;]*m//g'; }
+ui_rule() {
+    local bar
+    printf -v bar '%*s' "$UI_WIDTH" ''
+    printf '%s%s%s\n' "$DIM" "${bar// /─}" "$RESET"
+}
+ui_box_row() {
+    local padding=$((UI_WIDTH - 4 - ${#1}))
+    if (( padding < 0 )); then padding=0; fi
+    printf '%s│%s %s%s%s%*s %s│%s\n' "$PURPLE" "$RESET" "${2:-$BLUE}" "$1" "$RESET" "$padding" '' "$PURPLE" "$RESET"
+}
+ui_banner() {
+    local bar
+    printf -v bar '%*s' "$((UI_WIDTH - 2))" ''
+    bar=${bar// /─}
+    printf '\n%s╭%s╮%s\n' "$PURPLE" "$bar" "$RESET"
+    ui_box_row 'PTERO / VIBE INSTALLER' "$BOLD$PURPLE"
+    ui_box_row 'Panel + Wings · Installation assistée' "$BLUE"
+    ui_box_row 'Debian / Ubuntu · Mode rapide ou avancé' "$DIM"
+    printf '%s╰%s╯%s\n\n' "$PURPLE" "$bar" "$RESET"
+}
+ui_section() {
+    printf '\n  %s%s%s\n' "$BOLD${2:-$PURPLE}" "$1" "$RESET"
+    ui_rule
+}
+ui_option() {
+    printf '  %s[%s]%s %-20s %s%s%s\n' "$BOLD$BLUE" "$1" "$RESET" "$2" "$DIM" "${3:-}" "$RESET"
+}
+ui_kv() {
+    local padding=$((20 - ${#1}))
+    if (( padding < 1 )); then padding=1; fi
+    printf '  %s%s%s%*s%s\n' "$DIM" "$1" "$RESET" "$padding" '' "$2"
+}
+ui_message() { printf '  %s%-9s%s %s\n' "$BOLD$2" "$1" "$RESET" "$3"; }
+info() { ui_message INFO "$BLUE" "$*"; }
+ok() { ui_message OK "$GREEN" "$*"; }
+warn() { ui_message ATTENTION "$YELLOW" "$*"; }
+die() { ui_message ERREUR "$RED" "$*" >&2; exit 1; }
+ui_error() { ui_message ERREUR "$RED" "Échec ligne $1 (code $2) · $STAGE" >&2; }
+ui_preview() {
+    ui_banner
+    ui_section 'APERÇU · aucune installation'
+    ui_option 1 'Panel' 'Interface web et administrateur'
+    ui_option 2 'Wings' 'Nœud pour les serveurs de jeux'
+    ui_option 3 'Panel + Wings' 'Installation complète'
+    printf '\n'
+    info 'Préparation des dépendances…'
+    ok 'Panel configuré · exemple de message de réussite'
+    warn 'SMTP non configuré · exemple de point à compléter'
+    ui_section 'Exemple de récapitulatif' "$GREEN"
+    ui_kv 'Panel' 'http://203.0.113.10'
+    ui_kv 'Wings' '203.0.113.10:8080'
+    ui_kv 'Base de données' '172.18.0.1:3306'
+    info 'Démonstration terminée : aucun paquet, service ou fichier système modifié.'
+}
 cleanup() {
     local status=$?
     trap - EXIT
@@ -63,7 +135,9 @@ cleanup() {
     if [[ -n $TMP && $TMP == /tmp/ptero-install.* ]]; then rm -rf -- "$TMP"; fi
     unset DB_PASSWORD ADMIN_PASSWORD SMTP_PASSWORD APPLICATION_KEY GAME_DB_PASSWORD
     if (( status != 0 )); then
-        printf '\nArrêt à l’étape : %s. Journal : %s\n' "$STAGE" "${LOG:-non initialisé}" >&2
+        ui_section 'INSTALLATION INTERROMPUE' "$RED" >&2
+        ui_kv 'Étape' "$STAGE" >&2
+        ui_kv 'Journal' "${LOG:-non initialisé}" >&2
         if [[ -z $LOG ]]; then
             printf 'Arrêt avant installation : aucun paquet ni service modifié.\n' >&2
         else
@@ -77,21 +151,21 @@ cleanup() {
     exit "$status"
 }
 trap cleanup EXIT
-trap 'printf "\nÉchec ligne %s (code %s), étape : %s\n" "$LINENO" "$?" "$STAGE" >&2' ERR
+trap 'ui_error "$LINENO" "$?"' ERR
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
 ask() {
     local target=$1 prompt=$2 fallback=${3-} value
-    printf '%s' "$prompt" > /dev/tty
-    if [[ -n $fallback ]]; then printf ' [%s]' "$fallback" > /dev/tty; fi
-    printf ' : ' > /dev/tty
+    printf '\n  %s›%s %s' "$BOLD$BLUE" "$RESET" "$prompt" > /dev/tty
+    if [[ -n $fallback ]]; then printf ' %s[%s]%s' "$DIM" "$fallback" "$RESET" > /dev/tty; fi
+    printf '\n  %s→%s ' "$BLUE" "$RESET" > /dev/tty
     IFS= read -r value < /dev/tty || die 'Saisie interrompue.'
     printf -v "$target" '%s' "${value:-$fallback}"
 }
 secret() {
     local target=$1 prompt=$2 value
-    printf '%s : ' "$prompt" > /dev/tty
+    printf '\n  %s›%s %s %s(saisie masquée)%s\n  %s→%s ' "$BOLD$PURPLE" "$RESET" "$prompt" "$DIM" "$RESET" "$PURPLE" "$RESET" > /dev/tty
     IFS= read -rs value < /dev/tty || die 'Saisie interrompue.'
     printf '\n' > /dev/tty
     printf -v "$target" '%s' "$value"
@@ -243,7 +317,7 @@ nginx_modern_http2() {
 
 docker_smoke_test() {
     if ! docker run --rm hello-world > "$DIAGNOSTICS/docker-container-test.log" 2>&1; then
-        info "Le test hello-world a échoué (réseau Docker Hub ou exécution du conteneur). Détails : $DIAGNOSTICS/docker-container-test.log"
+        warn "Le test hello-world a échoué (réseau Docker Hub ou exécution du conteneur). Détails : $DIAGNOSTICS/docker-container-test.log"
         info 'Docker répond à docker info ; l’installation continue, le démarrage des conteneurs reste à vérifier.'
     fi
 }
@@ -266,12 +340,28 @@ mark_done() {
     touch "$STATE_DIR/$1.done"
 }
 run_step() {
-    local step=$1
+    local step=$1 title started=$SECONDS
     shift
     if [[ -f $STATE_DIR/$step.done ]]; then info "Étape déjà terminée : $step"; return 0; fi
+    case "$step" in
+        firewall) title='Pare-feu et accès réseau';;
+        certificates) title='Certificats et connexion HTTPS';;
+        panel-dependencies) title='Dépendances du Panel';;
+        database) title='Base de données du Panel';;
+        panel-install) title='Installation de Pterodactyl Panel';;
+        panel-migrations) title='Préparation des tables et des eggs';;
+        panel-services) title='Worker et tâches planifiées';;
+        webserver) title='Serveur web';;
+        docker) title='Docker et moteur de conteneurs';;
+        wings-install) title='Wings et liaison du nœud';;
+        game-ports) title='Ports et allocations des jeux';;
+        *) title=$step;;
+    esac
+    ui_section "$title"
     STAGE=$step
     "$@"
     mark_done "$step"
+    ok "$title · terminé en $((SECONDS - started)) s"
 }
 resource_defaults() {
     local available_mib=$1 available_disk_mib=$2 reserve
@@ -318,7 +408,8 @@ preflight() {
     command -v apt-get >/dev/null || die 'APT est requis sur ce serveur Ubuntu/Debian.'
     LOG="/var/log/pterodactyl-install-$(date +%Y%m%d-%H%M%S)-$$.log"
     touch "$LOG"; chmod 600 "$LOG"
-    exec > >(tee -a "$LOG") 2>&1
+    # Le terminal conserve les couleurs ; le journal reçoit du texte brut.
+    exec > >(tee >(ui_plain_logs >> "$LOG")) 2>&1
     if ! command -v flock >/dev/null || ! command -v awk >/dev/null || [[ ! -f /usr/share/zoneinfo/Europe/Paris ]]; then
         apt_update
         apt_install util-linux tzdata mawk
@@ -337,6 +428,7 @@ preflight() {
 }
 
 questions_quick() {
+    ui_section 'Configuration rapide'
     WEB=nginx FIREWALL=0 TIMEZONE=Europe/Paris
     ADMIN_USER=admin ADMIN_FIRST=Admin ADMIN_LAST=Pterodactyl
     DB_PASSWORD='' ADMIN_PASSWORD=''
@@ -383,7 +475,11 @@ questions_quick() {
     fi
     info "Mode rapide : Nginx, admin, mots de passe générés, fuseau $TIMEZONE, SMTP désactivé, UFW non activé automatiquement."
     if (( WINGS )); then info 'Ports de jeux prédéfinis : Minecraft, GMod/Source, Rust, FiveM, Valheim, Terraria, Factorio, Zomboid, ARK.'; fi
-    info "Panel : $PANEL_URL ; SSL : $SSL ; DB jeux : $GAME_DB_ENABLED."
+    ui_section 'Vérifier les paramètres'
+    ui_kv 'Panel' "$PANEL_URL"
+    ui_kv 'Administrateur' "${ADMIN_EMAIL:-Panel distant}"
+    ui_kv 'SSL' "$SSL"
+    ui_kv 'DB des jeux' "$GAME_DB_ENABLED"
     if [[ $SSL == le ]]; then
         info 'Le DNS doit pointer vers ce serveur et le port 80 être accessible.'
         yesno 'Installer et accepter les conditions Let’s Encrypt https://letsencrypt.org/repository/' o || exit 0
@@ -395,13 +491,22 @@ questions_quick() {
 questions() {
     STAGE=questionnaire
     local choice username confirm ssh_default ssl_default=1 link_available=1 panel_https_default=o
-    printf '\n1) Panel uniquement\n2) Wings uniquement\n3) Panel + Wings\n4) Configurer MariaDB pour les jeux\n5) Ajouter les ports de jeux (Panel + Wings déjà installés ici)\n0) Quitter\n'
+    ui_section 'Que veux-tu installer ?'
+    ui_option 1 'Panel' 'Interface web et administrateur'
+    ui_option 2 'Wings' 'Nœud pour les serveurs de jeux'
+    ui_option 3 'Panel + Wings' 'Installation complète sur cette machine'
+    ui_option 4 'Bases de données' 'Préparer MariaDB pour les jeux'
+    ui_option 5 'Ports des jeux' 'Ajouter les allocations prédéfinies'
+    ui_option 0 'Quitter'
     while true; do
         ask choice 'Installation souhaitée'
         case "$choice" in 1) PANEL=1; break;; 2) WINGS=1; break;; 3) PANEL=1; WINGS=1; break;; 4) DB_ONLY=1; return 0;; 5) PORTS_ONLY=1; return 0;; 0) exit 0;; esac
     done
+    ui_section 'Comment configurer ?'
+    ui_option 1 'Rapide' 'Recommandé · réglages automatiques'
+    ui_option 2 'Avancée' 'Personnaliser les options'
     while true; do
-        ask choice 'Configuration : 1=rapide (recommandé), 2=avancée' 1
+        ask choice 'Mode de configuration' 1
         case "$choice" in 1) QUICK_MODE=1; questions_quick; return 0;; 2) QUICK_MODE=0; break;; esac
     done
     (( PANEL == 0 )) || address PANEL_DOMAIN 'Adresse du Panel'
@@ -1525,27 +1630,35 @@ verify() {
 
 summary() {
     STAGE=terminé
-    printf '\n========== Installation terminée ==========\n'
-    printf 'OS : %s\nJournal : %s\n' "$PRETTY_NAME" "$LOG"
-    printf 'Configuration rapide : %s ; DB jeux demandée : %s\n' "$QUICK_MODE" "$GAME_DB_ENABLED"
-    printf 'État de l’installation et diagnostics privés : %s\n' "$STATE_DIR"
-    printf 'Les versions sélectionnées sont conservées pour les reprises ; ce script ne met pas à jour une installation terminée.\n'
+    ui_section 'INSTALLATION TERMINÉE' "$GREEN"
+    ok 'La préparation est terminée. Retrouvez les accès ci-dessous.'
+    ui_kv 'Système' "$PRETTY_NAME"
+    if (( QUICK_MODE )); then ui_kv 'Configuration' 'Rapide'; else ui_kv 'Configuration' 'Avancée'; fi
+    ui_kv 'Journal' "$LOG"
+    ui_kv 'Diagnostics privés' "$STATE_DIR"
+    info 'Versions conservées pour les reprises ; aucune mise à jour automatique.'
     if (( PANEL )); then
-        printf 'Panel %s : %s\nAdministrateur : %s (%s)\n' "$PANEL_TAG" "$PANEL_URL" "$ADMIN_USER" "$ADMIN_EMAIL"
-        printf 'Identifiants (root uniquement) : %s\nLecture : sudo cat %s\n' "$CREDENTIALS" "$CREDENTIALS"
-        printf 'Sauvegarder la base, .env et APP_KEY hors du serveur. Ne jamais régénérer APP_KEY.\n'
-        [[ $MAIL_MAILER != log ]] || printf 'SMTP non configuré : les emails sont consignés localement, sans envoi.\n'
+        ui_section 'Accès au Panel'
+        ui_kv 'Version' "$PANEL_TAG"
+        ui_kv 'URL' "$PANEL_URL"
+        ui_kv 'Administrateur' "$ADMIN_USER · $ADMIN_EMAIL"
+        ui_kv 'Identifiants privés' "$CREDENTIALS"
+        info "Lecture des identifiants : sudo cat $CREDENTIALS"
+        info 'Sauvegarder la base, .env et APP_KEY hors du serveur. Ne jamais régénérer APP_KEY.'
+        [[ $MAIL_MAILER != log ]] || info 'SMTP non configuré : emails consignés localement, sans envoi.'
     fi
     if (( WINGS )); then
-        printf 'Wings %s : %s:8080 ; SFTP : %s:2022\n' "$WINGS_TAG" "$WINGS_DOMAIN" "$WINGS_DOMAIN"
+        ui_section 'Nœud et serveurs de jeux'
+        ui_kv 'Wings' "$WINGS_TAG · $WINGS_DOMAIN:8080"
+        ui_kv 'SFTP' "$WINGS_DOMAIN:2022"
         if (( WINGS_READY )); then
-            printf 'Wings démarré. Vérifier le statut du nœud dans le Panel.\n'
+            ok 'Wings démarré. Vérifier le statut du nœud dans le Panel.'
             if (( AUTO_LINK )); then
                 printf 'Nœud créé automatiquement : %s ; localisation : %s.\n' "$NODE_NAME" "$LOCATION_SHORT"
                 printf 'Identifiants des objets créés : /etc/pterodactyl/panel-link.json\n'
             fi
         else
-            printf 'Wings installé, configuration à ajouter avant démarrage :\n'
+            warn 'Wings installé : configuration à ajouter avant démarrage.'
             printf '  1. %s → Admin → Locations / Nodes → Configuration.\n' "$PANEL_URL"
             printf '  2. sudo nano /etc/pterodactyl/config.yml (coller le YAML complet).\n'
             printf '     Nœud %s, API 8080, SFTP 2022 ; mêmes valeurs dans le Panel.\n' "$WINGS_DOMAIN"
@@ -1561,9 +1674,11 @@ summary() {
         printf 'Docker publie les ports des conteneurs en contournant UFW : filtrer via DOCKER-USER ou le pare-feu hébergeur.\n'
     fi
     if [[ -f $STATE_DIR/game-db.done ]]; then
+        ui_section 'Bases de données'
         local db_binding
         db_binding=$(docker inspect --format '{{range index .HostConfig.PortBindings "3306/tcp"}}{{.HostIp}}:{{.HostPort}}{{end}}' ptero-installer-game-db 2>/dev/null) || db_binding='à vérifier'
-        printf 'DB Panel : 127.0.0.1:3306 ; DB jeux : %s → conteneur:3306 (IP et instances séparées).\n' "$db_binding"
+        ui_kv 'DB Panel' '127.0.0.1:3306'
+        ui_kv 'DB jeux' "$db_binding → conteneur:3306"
     fi
     if [[ $SSL == le ]]; then
         printf 'Renouvellement : certbot.timer ; test conseillé : sudo certbot renew --dry-run\n'
@@ -1571,25 +1686,34 @@ summary() {
     elif [[ $SSL == existing ]]; then
         printf 'Certificats existants : prévoir leur renouvellement et le rechargement du web/redémarrage de Wings.\n'
     fi
-    printf 'Diagnostic : journalctl -u pteroq -u wings -n 80 --no-pager\n'
+    ui_section 'Prochaines étapes'
+    info 'Diagnostic : journalctl -u pteroq -u wings -n 80 --no-pager'
 }
 
 main() {
     local action=1
+    ui_init
     case "${1:-}" in
-        --help|-h) printf 'Usage : sudo bash install.sh [--resume|--configure-databases|--configure-ports]\n'; return 0;;
+        --help|-h) printf 'Usage : sudo bash install.sh [--resume|--configure-databases|--configure-ports|--preview]\n'; return 0;;
+        --preview) ui_preview; return 0;;
         ''|--resume) ;;
         --configure-databases) DB_ONLY=1;;
         --configure-ports) PORTS_ONLY=1;;
         *) die 'Option inconnue. Utiliser --help.';;
     esac
+    ui_banner
     preflight
     if [[ -f $STATE_DIR/settings ]]; then
         [[ ! -L $STATE_DIR/settings && $(stat -c %u "$STATE_DIR/settings") == 0 && $(stat -c %a "$STATE_DIR/settings") == 600 ]] || die 'Fichier d’état non sûr.'
         if [[ ${1:-} != --resume ]]; then
             if (( DB_ONLY == 0 && PORTS_ONLY == 0 )); then
+                ui_section 'Installation existante'
+                ui_option 1 'Reprendre / résumé' 'Conserver les réglages enregistrés'
+                ui_option 4 'Bases de données' 'Préparer ou adapter MariaDB'
+                ui_option 5 'Ports des jeux' 'Ajouter les allocations'
+                ui_option 0 'Quitter'
                 while true; do
-                    ask action 'Installation enregistrée : 1=reprendre/résumé, 4=DB des jeux, 5=ports des jeux, 0=quitter' 1
+                    ask action 'Choix' 1
                     case "$action" in 1) break;; 4) DB_ONLY=1; break;; 5) PORTS_ONLY=1; break;; 0) return 0;; esac
                 done
             fi

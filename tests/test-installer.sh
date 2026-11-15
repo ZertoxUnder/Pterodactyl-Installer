@@ -12,8 +12,25 @@ TMP=$(mktemp -d /tmp/ptero-install.XXXXXXXX)
 STATE_DIR=$TMP/state
 mkdir -m 700 "$STATE_DIR"
 
+NO_COLOR=1 FORCE_COLOR=1 TERM=xterm-256color COLUMNS=70 ui_init
+[[ -z $BLUE && -z $RESET && $UI_WIDTH == 68 ]]
+NO_COLOR='' FORCE_COLOR=1 TERM=xterm-256color COLUMNS=70 ui_init
+[[ -n $BLUE && -n $RESET ]]
+colored_banner=$(ui_banner)
+[[ $colored_banner == *$'\033['* ]]
+plain_banner=$(printf '%s\n' "$colored_banner" | ui_plain_logs)
+[[ $plain_banner != *$'\033'* && $plain_banner == *'PTERO / VIBE INSTALLER'* ]]
+while IFS= read -r banner_line; do
+    case "$banner_line" in ╭*|│*|╰*) [[ ${#banner_line} == 68 ]];; esac
+done <<< "$plain_banner"
+NO_COLOR=1 TERM=dumb COLUMNS=70 ui_init
+[[ -z $BLUE && $(ui_banner) != *$'\033'* ]]
+preview=$(main --preview)
+[[ $preview == *'APERÇU'* && $preview == *'aucun paquet, service ou fichier système modifié'* ]]
+printf 'PASS terminal palette, NO_COLOR, Unicode banner alignment and plain logs\n'
+
 # Appel indirect par la fonction chargée depuis install.sh.
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 ss() { printf 'LISTEN 0 128 %s 0.0.0.0:*\n' "$TEST_DB_LISTENER"; }
 for TEST_DB_LISTENER in 127.0.0.1:3306 10.0.0.5:3306; do
     game_db_port_available 172.18.0.1
@@ -74,7 +91,8 @@ printf 'PASS generated Nginx configurations, old and modern versions\n'
 DIAGNOSTICS=$TMP/diagnostics
 mkdir "$DIAGNOSTICS"
 # Appel indirect depuis docker_smoke_test, chargé via source.
-# shellcheck disable=SC2329
+# ShellCheck 0.9 signale SC2317 ; 0.11 signale SC2329 pour ce mock indirect.
+# shellcheck disable=SC2317,SC2329
 docker() { printf 'simulated registry failure\n' >&2; return 125; }
 docker_smoke_test
 grep -Fq 'simulated registry failure' "$DIAGNOSTICS/docker-container-test.log"
