@@ -18,6 +18,8 @@ jobs:
           shellcheck install.sh tests/test-installer.sh
       - name: Run isolated regression tests
         run: bash tests/test-installer.sh
+      - name: Check game port allocations
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
       - name: Check embedded Python syntax
         run: |
           python3 - <<'PY'

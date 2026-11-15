@@ -12,6 +12,26 @@ TMP=$(mktemp -d /tmp/ptero-install.XXXXXXXX)
 STATE_DIR=$TMP/state
 mkdir -m 700 "$STATE_DIR"
 
+for selection in all none minecraft minecraft,source bedrock,rust,fivem,valheim,terraria,factorio,zomboid,ark; do
+    valid_game_port_selection "$selection"
+done
+for selection in unknown ',minecraft' 'minecraft,' 'minecraft,,source' 'minecraft;touch file'; do
+    if valid_game_port_selection "$selection"; then exit 1; fi
+done
+ufw() { printf '%s\n' "$*" >> "$TMP/game-firewall-rules"; }
+GAME_PORTS=minecraft,source,fivem
+game_port_firewall_rules
+grep -Fq 'allow 25565:25574/tcp' "$TMP/game-firewall-rules"
+grep -Fq 'allow 27015:27024/udp' "$TMP/game-firewall-rules"
+grep -Fq 'allow 30120:30124/tcp' "$TMP/game-firewall-rules"
+grep -Fq 'allow 30120:30124/udp' "$TMP/game-firewall-rules"
+if grep -Eq '3306|3307|28015|25575' "$TMP/game-firewall-rules"; then exit 1; fi
+GAME_PORTS=none
+game_port_firewall_rules
+[[ $(wc -l < "$TMP/game-firewall-rules") == 4 ]]
+GAME_PORTS=all
+printf 'PASS game profiles and scoped TCP/UDP firewall rules\n'
+
 for version in 1.25.1 1.26.0 1.28.0 2.0.0 1.25.1-custom; do
     nginx_modern_http2 "$version"
 done

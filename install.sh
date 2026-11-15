@@ -35,6 +35,7 @@ STATE_DIR=/var/lib/pterodactyl-installer
 DIAGNOSTICS='' INSTALL_OS=''
 APT_REFRESHED=0
 QUICK_MODE=1 GAME_DB_ENABLED=0 DB_ONLY=0
+GAME_PORTS=all PORTS_ONLY=0 ALLOCATION_IP=${ALLOCATION_IP:-}
 RED=$'\033[31m' GREEN=$'\033[32m' BLUE=$'\033[36m' RESET=$'\033[0m'
 
 info() { printf '%s[INFO]%s %s\n' "$BLUE" "$RESET" "$*"; }
@@ -47,7 +48,7 @@ cleanup() {
     repair_panel_runtime_permissions || true
     if (( status != 0 )) && [[ -n $DIAGNOSTICS && -n $TMP && -d $TMP ]]; then
         local diagnostic
-        for diagnostic in sql-output admin-output game-db-output; do
+        for diagnostic in sql-output admin-output game-db-output ports-output; do
             if [[ -f $TMP/$diagnostic ]]; then
                 cp -- "$TMP/$diagnostic" "$DIAGNOSTICS/$diagnostic.log" || true
                 chmod 600 "$DIAGNOSTICS/$diagnostic.log" || true
@@ -175,8 +176,50 @@ composer_run() {
         "$PHP_BIN" /usr/local/bin/composer --no-interaction "$@"
 }
 
+# Plages proposées pour plusieurs serveurs ; les eggs doivent utiliser les
+# allocations choisies. Les ports d'administration ne sont pas ajoutés en TCP.
+game_port_catalog() {
+    cat <<'PORTS'
+minecraft|Minecraft Java|25565-25574|tcp
+bedrock|Minecraft Bedrock|19132-19141|udp
+source|GMod / CS2 / CSS / TF2|27015-27024|udp
+rust|Rust jeu et query|28015-28017|udp
+fivem|FiveM|30120-30124|tcp,udp
+valheim|Valheim|2456-2457|udp
+terraria|Terraria|7777|tcp
+factorio|Factorio|34197|udp
+zomboid|Project Zomboid|16261-16262|udp
+ark|ARK Survival Evolved jeu|7777-7778|udp
+ark|ARK Survival Evolved query|27015|udp
+PORTS
+}
+valid_game_port_selection() {
+    local selection=$1 item
+    local -a items
+    [[ $selection == all || $selection == none ]] && return 0
+    [[ -n $selection && $selection != ,* && $selection != *, && $selection != *,,* ]] || return 1
+    IFS=, read -r -a items <<< "$selection"
+    for item in "${items[@]}"; do
+        case "$item" in minecraft|bedrock|source|rust|fivem|valheim|terraria|factorio|zomboid|ark) ;;
+            *) return 1;;
+        esac
+    done
+}
+game_port_selected() { [[ $GAME_PORTS == all || ",$GAME_PORTS," == *",$1,"* ]]; }
+game_port_firewall_rules() {
+    local profile label range protocols proto
+    local -a protocol_list
+    while IFS='|' read -r profile label range protocols; do
+        game_port_selected "$profile" || continue
+        IFS=, read -r -a protocol_list <<< "$protocols"
+        for proto in "${protocol_list[@]}"; do
+            ufw allow "${range/-/:}/$proto" comment "$label"
+        done
+    done < <(game_port_catalog)
+}
+
 repair_panel_runtime_permissions() {
-    if (( PANEL )) && { [[ -f $STATE_DIR/panel-files.done ]] || (( DB_ONLY )); }; then
+    if (( PANEL )) && { [[ -f $STATE_DIR/panel-files.done ]] || (( DB_ONLY || PORTS_ONLY )); }; then
         local path
         for path in "$PANEL_DIR/storage" "$PANEL_DIR/bootstrap/cache"; do
             [[ -d $path ]] || continue
@@ -203,7 +246,7 @@ docker_smoke_test() {
 
 state_save() {
     local name
-    local -a names=(INSTALL_OS PANEL WINGS FIREWALL AUTO_LINK QUICK_MODE GAME_DB_ENABLED PANEL_DOMAIN WINGS_DOMAIN PANEL_URL WEB SSL
+    local -a names=(INSTALL_OS PANEL WINGS FIREWALL AUTO_LINK QUICK_MODE GAME_DB_ENABLED GAME_PORTS ALLOCATION_IP PANEL_DOMAIN WINGS_DOMAIN PANEL_URL WEB SSL
         PANEL_CERT PANEL_KEY WINGS_CERT WINGS_KEY LE_EMAIL SSH_PORT TIMEZONE
         DB_PASSWORD ADMIN_PASSWORD ADMIN_EMAIL ADMIN_USER ADMIN_FIRST ADMIN_LAST
         MAIL_MAILER SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASSWORD SMTP_ENCRYPTION SMTP_FROM SMTP_NAME
@@ -334,7 +377,8 @@ questions_quick() {
             if [[ -n $APPLICATION_KEY ]]; then AUTO_LINK=1; fi
         fi
     fi
-    info "Mode rapide : Nginx, admin, mots de passe générés, fuseau $TIMEZONE, SMTP et UFW inchangés."
+    info "Mode rapide : Nginx, admin, mots de passe générés, fuseau $TIMEZONE, SMTP désactivé, UFW non activé automatiquement."
+    if (( WINGS )); then info 'Ports de jeux prédéfinis : Minecraft, GMod/Source, Rust, FiveM, Valheim, Terraria, Factorio, Zomboid, ARK.'; fi
     info "Panel : $PANEL_URL ; SSL : $SSL ; DB jeux : $GAME_DB_ENABLED."
     if [[ $SSL == le ]]; then
         info 'Le DNS doit pointer vers ce serveur et le port 80 être accessible.'
@@ -347,10 +391,10 @@ questions_quick() {
 questions() {
     STAGE=questionnaire
     local choice username confirm ssh_default ssl_default=1 link_available=1 panel_https_default=o
-    printf '\n1) Panel uniquement\n2) Wings uniquement\n3) Panel + Wings\n4) Configurer MariaDB pour les jeux (Panel + Wings déjà installés ici)\n0) Quitter\n'
+    printf '\n1) Panel uniquement\n2) Wings uniquement\n3) Panel + Wings\n4) Configurer MariaDB pour les jeux\n5) Ajouter les ports de jeux (Panel + Wings déjà installés ici)\n0) Quitter\n'
     while true; do
         ask choice 'Installation souhaitée'
-        case "$choice" in 1) PANEL=1; break;; 2) WINGS=1; break;; 3) PANEL=1; WINGS=1; break;; 4) DB_ONLY=1; return 0;; 0) exit 0;; esac
+        case "$choice" in 1) PANEL=1; break;; 2) WINGS=1; break;; 3) PANEL=1; WINGS=1; break;; 4) DB_ONLY=1; return 0;; 5) PORTS_ONLY=1; return 0;; 0) exit 0;; esac
     done
     while true; do
         ask choice 'Configuration : 1=rapide (recommandé), 2=avancée' 1
@@ -476,6 +520,14 @@ questions() {
     if (( PANEL && WINGS )); then
         if yesno 'Préparer aussi MariaDB pour les bases des jeux' o; then GAME_DB_ENABLED=1; fi
     fi
+    if (( WINGS )); then
+        while true; do
+            ask GAME_PORTS 'Ports : all, none ou profils séparés par virgules (minecraft,bedrock,source,rust,fivem,valheim,terraria,factorio,zomboid,ark)' all
+            valid_game_port_selection "$GAME_PORTS" && break
+        done
+        ask ALLOCATION_IP 'IP locale des allocations (vide = détection automatique)'
+        [[ -z $ALLOCATION_IP ]] || is_ipv4 "$ALLOCATION_IP" || die 'IP d’allocation IPv4 invalide.'
+    fi
     printf '\nOS : %s ; Panel : %s ; Wings : %s ; web : %s ; SSL : %s\n' "$PRETTY_NAME" "$PANEL" "$WINGS" "${WEB:-aucun}" "$SSL"
     info 'Les ports 80/443 (web), 8080 (Wings API) et 2022 (SFTP) seront utilisés selon le mode.'
     yesno 'Lancer l’installation sur ce serveur vierge' n || exit 0
@@ -555,6 +607,7 @@ firewall() {
         if (( PANEL )) || [[ $SSL == le ]]; then ufw allow 80/tcp; fi
         if (( PANEL )) && [[ $SSL != none ]]; then ufw allow 443/tcp; fi
         if (( WINGS )); then ufw allow 8080/tcp; ufw allow 2022/tcp; fi
+        if (( WINGS )); then game_port_firewall_rules; fi
         ufw --force enable
     else
         info 'Pare-feu inchangé : ouvrir les ports nécessaires dans le pare-feu local et celui de l’hébergeur.'
@@ -947,6 +1000,99 @@ DOCKER
 # Instance MariaDB dédiée aux jeux : volume persistant et port 3307 lié
 # uniquement à la passerelle privée du réseau Docker de Wings. La base du
 # Panel, sur MariaDB système/3306, conserve sa configuration et ses comptes.
+configure_game_ports() {
+    STAGE='ports de jeux et allocations'
+    valid_game_port_selection "$GAME_PORTS" || die 'Sélection de ports inconnue.'
+    [[ $GAME_PORTS != none ]] || return 0
+    if (( PORTS_ONLY )); then
+        [[ -f $PANEL_DIR/artisan && -f /etc/pterodactyl/config.yml ]] || die 'Installer le Panel et configurer Wings sur cette machine avant l’option ports.'
+    fi
+    if ! command -v python3 >/dev/null || ! command -v ip >/dev/null || ! python3 -c 'import yaml' >/dev/null 2>&1; then
+        apt_update
+        apt_install python3 python3-yaml iproute2
+    fi
+    game_port_catalog > "$STATE_DIR/game-ports.catalog"
+    ip -j -4 address show scope global > "$TMP/host-addresses.json"
+    local preferred
+    preferred=$(ip -4 route show default | awk 'NR==1 {print $5}')
+    export GAME_PORTS ALLOCATION_IP
+    python3 - "$STATE_DIR/game-ports.catalog" "$TMP/host-addresses.json" "$preferred" "$STATE_DIR/game-ports.json" <<'PY'
+import ipaddress, json, os, sys
+from pathlib import Path
+interfaces = json.loads(Path(sys.argv[2]).read_text(encoding='utf-8'))
+addresses = []
+for interface in interfaces:
+    name = interface['ifname']
+    if name.startswith(('lo', 'docker', 'veth', 'br-', 'pterodactyl')):
+        continue
+    for address in interface.get('addr_info', []):
+        ip = ipaddress.IPv4Address(address['local'])
+        if not ip.is_loopback and not ip.is_link_local:
+            addresses.append((name, str(ip)))
+requested = os.environ.get('ALLOCATION_IP', '')
+if requested:
+    assert requested in [x[1] for x in addresses], 'L’IP des allocations doit être assignée à la machine (IP locale derrière un NAT)'
+    allocation_ip = requested
+else:
+    assert addresses, 'Aucune IPv4 locale disponible ; préciser ALLOCATION_IP'
+    allocation_ip = next((x[1] for x in addresses if x[0] == sys.argv[3]), addresses[0][1])
+selection = os.environ['GAME_PORTS'].split(',')
+ports, names = set(), {}
+for line in Path(sys.argv[1]).read_text(encoding='utf-8').splitlines():
+    profile, label, port_range, protocols = line.split('|')
+    if 'all' not in selection and profile not in selection:
+        continue
+    bounds = list(map(int, port_range.split('-')))
+    for port in range(bounds[0], bounds[-1] + 1):
+        assert 1024 < port <= 65535
+        ports.add(port)
+        names.setdefault(str(port), []).append(label)
+result = {'allocation_ip': allocation_ip, 'ports': sorted(ports), 'games': names}
+p = Path(sys.argv[4])
+t = p.with_name(p.name + '.new')
+t.write_text(json.dumps(result))
+t.replace(p)
+PY
+    if (( PANEL || PORTS_ONLY )) && [[ -f $PANEL_DIR/artisan && -f /etc/pterodactyl/config.yml ]]; then
+        local node_uuid
+        node_uuid=$(python3 - <<'PY'
+import uuid, yaml
+from pathlib import Path
+print(uuid.UUID(yaml.safe_load(Path('/etc/pterodactyl/config.yml').read_text())['uuid']))
+PY
+)
+        export PORTS_NODE_UUID=$node_uuid PORTS_MANIFEST="$STATE_DIR/game-ports.json"
+        PHP_BIN="/usr/bin/php$PHP_VERSION"
+        (
+            cd "$PANEL_DIR"
+            "$PHP_BIN" > "$TMP/ports-output" 2>&1 <<'PHP'
+<?php
+require 'vendor/autoload.php';
+$app = require 'bootstrap/app.php';
+$app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+$node = Pterodactyl\Models\Node::where('uuid', getenv('PORTS_NODE_UUID'))->firstOrFail();
+$manifest = json_decode(file_get_contents(getenv('PORTS_MANIFEST')), true, 512, JSON_THROW_ON_ERROR);
+$app->make(Pterodactyl\Services\Allocations\AssignmentService::class)->handle($node, [
+    'allocation_ip' => $manifest['allocation_ip'],
+    'allocation_ports' => array_map('strval', $manifest['ports']),
+    'allocation_alias' => $node->fqdn === $manifest['allocation_ip'] ? null : $node->fqdn,
+]);
+PHP
+        )
+        repair_panel_runtime_permissions
+        ok 'Allocations des jeux ajoutées au nœud ; les allocations existantes sont conservées.'
+    else
+        if (( PORTS_ONLY )); then die 'Cette option nécessite le Panel et la configuration Wings sur cette machine.'; fi
+        info "Allocations à ajouter dans le Panel distant ou après configuration Wings : $STATE_DIR/game-ports.json"
+    fi
+    if command -v ufw >/dev/null && ufw status | grep -q '^Status: active'; then
+        game_port_firewall_rules
+    else
+        info 'UFW non activé : ouvrir ces ports dans le pare-feu hébergeur/NAT si nécessaire.'
+    fi
+    info "Ports préparés ($GAME_PORTS) : $STATE_DIR/game-ports.json. Assigner les allocations aux serveurs dans le Panel."
+}
+
 configure_game_databases() {
     STAGE='configuration MariaDB des jeux'
     [[ -f $PANEL_DIR/artisan && -f /etc/pterodactyl/config.yml ]] || die 'Installer le Panel et configurer Wings sur cette machine avant l’option DB.'
@@ -1344,8 +1490,12 @@ summary() {
             printf '  4. sudo wings --debug (vérifier, puis Ctrl+C)\n'
             printf '  5. sudo systemctl enable --now wings\n'
         fi
-        printf 'Créer les allocations IP/ports des jeux et ouvrir ces ports TCP/UDP chez l’hébergeur.\n'
+        printf 'Ports des jeux : %s (allocations locales ajoutées si le Panel et Wings sont configurés ici).\n' "$GAME_PORTS"
+        printf 'Assigner les allocations aux serveurs ; ouvrir les ports correspondants chez l’hébergeur/NAT.\n'
         printf 'Docker publie les ports des conteneurs en contournant UFW : filtrer via DOCKER-USER ou le pare-feu hébergeur.\n'
+    fi
+    if [[ -f $STATE_DIR/game-db.done ]]; then
+        printf 'DB Panel : 127.0.0.1:3306 ; DB jeux : passerelle Docker:3307 → conteneur:3306 (instances séparées).\n'
     fi
     if [[ $SSL == le ]]; then
         printf 'Renouvellement : certbot.timer ; test conseillé : sudo certbot renew --dry-run\n'
@@ -1359,19 +1509,20 @@ summary() {
 main() {
     local action=1
     case "${1:-}" in
-        --help|-h) printf 'Usage : sudo bash install.sh [--resume|--configure-databases]\n'; return 0;;
+        --help|-h) printf 'Usage : sudo bash install.sh [--resume|--configure-databases|--configure-ports]\n'; return 0;;
         ''|--resume) ;;
         --configure-databases) DB_ONLY=1;;
+        --configure-ports) PORTS_ONLY=1;;
         *) die 'Option inconnue. Utiliser --help.';;
     esac
     preflight
     if [[ -f $STATE_DIR/settings ]]; then
         [[ ! -L $STATE_DIR/settings && $(stat -c %u "$STATE_DIR/settings") == 0 && $(stat -c %a "$STATE_DIR/settings") == 600 ]] || die 'Fichier d’état non sûr.'
         if [[ ${1:-} != --resume ]]; then
-            if (( DB_ONLY == 0 )); then
+            if (( DB_ONLY == 0 && PORTS_ONLY == 0 )); then
                 while true; do
-                    ask action 'Installation enregistrée : 1=reprendre/résumé, 4=configurer les DB des jeux, 0=quitter' 1
-                    case "$action" in 1) break;; 4) DB_ONLY=1; break;; 0) return 0;; esac
+                    ask action 'Installation enregistrée : 1=reprendre/résumé, 4=DB des jeux, 5=ports des jeux, 0=quitter' 1
+                    case "$action" in 1) break;; 4) DB_ONLY=1; break;; 5) PORTS_ONLY=1; break;; 0) return 0;; esac
                 done
             fi
         fi
@@ -1379,13 +1530,16 @@ main() {
         . "$STATE_DIR/settings"
         [[ $INSTALL_OS == "$ID:$OS_CODENAME" ]] || die 'L’OS diffère de celui de l’installation enregistrée.'
         if (( DB_ONLY )); then configure_game_databases; return 0; fi
+        if (( PORTS_ONLY )); then PANEL=1; configure_game_ports; return 0; fi
         info "Reprise : Panel $PANEL_TAG ; Wings $WINGS_TAG ; $PANEL_URL"
         if [[ -f $STATE_DIR/complete.done ]]; then summary; return 0; fi
     else
         [[ ${1:-} != --resume ]] || die 'Aucun état de reprise trouvé pour cette version du script.'
         if (( DB_ONLY )); then PANEL=1; configure_game_databases; return 0; fi
+        if (( PORTS_ONLY )); then PANEL=1; configure_game_ports; return 0; fi
         questions
         if (( DB_ONLY )); then PANEL=1; configure_game_databases; return 0; fi
+        if (( PORTS_ONLY )); then PANEL=1; configure_game_ports; return 0; fi
         base_packages
         if (( PANEL )); then release panel "${PANEL_VERSION:-}" PANEL_TAG; fi
         if (( WINGS )); then release wings "${WINGS_VERSION:-}" WINGS_TAG; fi
@@ -1409,6 +1563,7 @@ main() {
         run_step wings-install wings_install
     fi
     if (( GAME_DB_ENABLED )) && [[ ! -f $STATE_DIR/game-db.done ]]; then configure_game_databases; fi
+    if (( WINGS )); then run_step game-ports configure_game_ports; fi
     repair_panel_runtime_permissions
     verify
     unset DB_PASSWORD ADMIN_PASSWORD SMTP_PASSWORD APPLICATION_KEY

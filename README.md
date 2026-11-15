@@ -11,6 +11,7 @@ Installateur Bash interactif pour **Pterodactyl Panel 1.x et Wings**.
 - Liaison automatique Panel/Wings, SMTP et UFW en option.
 - Mode rapide par défaut : peu de questions et mots de passe générés.
 - MariaDB dédiée aux bases des jeux, ajoutée automatiquement au Panel en option.
+- Ports prédéfinis et allocations automatiques : Minecraft, GMod/Source, Rust, FiveM, Valheim, Terraria, Factorio, Zomboid et ARK.
 - Reprise après interruption, logs et diagnostics privés.
 
 ## Installation
@@ -38,6 +39,12 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ZertoxUnder/Pterodactyl-Inst
 ```
 
 Elle crée une instance MariaDB Docker séparée, un volume persistant et un hôte DB dans le Panel. Le port 3307 est lié à la passerelle privée du réseau Wings. Attribuez ensuite une limite de bases supérieure à 0 à vos serveurs dans le Panel.
+
+**Pourquoi 3307 ?** Le Panel utilise déjà MariaDB sur 3306. La DB des jeux utilise 3307 côté machine pour séparer les instances ; dans son conteneur, elle reste sur 3306.
+
+L’option **5** ajoute les ports à une installation existante (ou utilisez `--configure-ports` avec la commande curl). Par défaut : Minecraft Java `25565–25574/TCP`, Bedrock `19132–19141/UDP`, GMod/Source `27015–27024/UDP`, FiveM `30120–30124/TCP+UDP`, et les ports des autres jeux listés plus haut. Les allocations déjà présentes sont conservées ; aucun serveur de jeu n’est créé.
+
+Les règles sont ajoutées si UFW est actif. Le pare-feu de l’hébergeur et le NAT restent à configurer. L’ajout automatique des allocations nécessite le Panel et Wings sur la même machine ; avec un Panel distant, un manifeste des ports est fourni.
 
 ## Reprendre une installation
 
