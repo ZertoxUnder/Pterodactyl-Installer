@@ -36,6 +36,7 @@ DIAGNOSTICS='' INSTALL_OS=''
 APT_REFRESHED=0
 QUICK_MODE=1 GAME_DB_ENABLED=0 DB_ONLY=0
 GAME_PORTS=all PORTS_ONLY=0 ALLOCATION_IP=${ALLOCATION_IP:-}
+GAME_DB_MIGRATING=0
 RED=$'\033[31m' GREEN=$'\033[32m' BLUE=$'\033[36m' RESET=$'\033[0m'
 
 info() { printf '%s[INFO]%s %s\n' "$BLUE" "$RESET" "$*"; }
@@ -44,6 +45,9 @@ die() { printf '%s[ERREUR]%s %s\n' "$RED" "$RESET" "$*" >&2; exit 1; }
 cleanup() {
     local status=$?
     trap - EXIT
+    if (( status != 0 && GAME_DB_MIGRATING )); then
+        restore_game_db_container || printf 'Restauration DB incomplète : vérifier les conteneurs ptero-installer-game-db et ptero-installer-game-db-port-backup.\n' >&2
+    fi
     # Un helper PHP root peut créer un log même s'il échoue.
     repair_panel_runtime_permissions || true
     if (( status != 0 )) && [[ -n $DIAGNOSTICS && -n $TMP && -d $TMP ]]; then
@@ -997,7 +1001,7 @@ DOCKER
     docker_smoke_test
 }
 
-# Instance MariaDB dédiée aux jeux : volume persistant et port 3307 lié
+# Instance MariaDB dédiée aux jeux : volume persistant et port 3306 lié
 # uniquement à la passerelle privée du réseau Docker de Wings. La base du
 # Panel, sur MariaDB système/3306, conserve sa configuration et ses comptes.
 configure_game_ports() {
@@ -1093,6 +1097,33 @@ PHP
     info "Ports préparés ($GAME_PORTS) : $STATE_DIR/game-ports.json. Assigner les allocations aux serveurs dans le Panel."
 }
 
+game_db_port_available() {
+    # Colonnes ss ignorées sauf l'adresse locale.
+    local gateway=$1 listeners state recv send address remainder
+    listeners=$(ss -H -ltn 'sport = :3306') || return 1
+    # shellcheck disable=SC2034
+    while read -r state recv send address remainder; do
+        case "$address" in
+            "$gateway:3306"|"[::ffff:$gateway]:3306"|0.0.0.0:3306|'*:3306'|'[::]:3306'|':::3306') return 1;;
+        esac
+    done <<< "$listeners"
+}
+
+restore_game_db_container() {
+    local container=ptero-installer-game-db backup=ptero-installer-game-db-port-backup
+    if docker container inspect "$backup" >/dev/null 2>&1; then
+        [[ $(docker inspect --format '{{index .Config.Labels "io.ptero-installer.managed"}}' "$backup") == game-db ]] || return 1
+        if docker container inspect "$container" >/dev/null 2>&1; then
+            [[ $(docker inspect --format '{{index .Config.Labels "io.ptero-installer.managed"}}' "$container") == game-db ]] || return 1
+            docker stop "$container" >/dev/null || return 1
+            docker rm "$container" >/dev/null || return 1
+        fi
+        docker rename "$backup" "$container" || return 1
+    fi
+    docker start "$container" >/dev/null || return 1
+    info 'Migration DB interrompue : ancien conteneur redémarré, volume conservé.'
+}
+
 configure_game_databases() {
     STAGE='configuration MariaDB des jeux'
     [[ -f $PANEL_DIR/artisan && -f /etc/pterodactyl/config.yml ]] || die 'Installer le Panel et configurer Wings sur cette machine avant l’option DB.'
@@ -1124,7 +1155,8 @@ gateway = next(x for x in gateways if x.version == 4 and x.is_private and not x.
 print(gateway)
 PY
 )
-    local container=ptero-installer-game-db volume=ptero-installer-game-db
+    local container=ptero-installer-game-db volume=ptero-installer-game-db backup=ptero-installer-game-db-port-backup
+    local binding image=mariadb:11.4
     local envfile=$STATE_DIR/game-db.env root_password='' key value attempt ready=0
     if [[ ! -e $envfile ]]; then
         {
@@ -1149,14 +1181,33 @@ PY
     if docker container inspect "$container" >/dev/null 2>&1; then
         [[ $(docker inspect --format '{{index .Config.Labels "io.ptero-installer.managed"}}' "$container") == game-db ]] || die 'Un conteneur étranger porte déjà ce nom.'
         [[ $(docker inspect --format '{{index .Config.Labels "io.ptero-installer.gateway"}}' "$container") == "$GAME_DB_GATEWAY" ]] || die 'Le réseau Wings a changé ; vérifier le conteneur DB existant.'
-        docker start "$container" >/dev/null
-    else
-        if [[ -n $(ss -H -ltn 'sport = :3307') ]]; then die 'Le port TCP 3307 est déjà occupé.'; fi
+        binding=$(docker inspect --format '{{range index .HostConfig.PortBindings "3306/tcp"}}{{.HostIp}}:{{.HostPort}}{{end}}' "$container")
+        case "$binding" in
+            "$GAME_DB_GATEWAY:3306") docker start "$container" >/dev/null;;
+            "$GAME_DB_GATEWAY:3307")
+                game_db_port_available "$GAME_DB_GATEWAY" || die "Le port $GAME_DB_GATEWAY:3306 est occupé (une écoute 0.0.0.0/IPv6 peut bloquer)."
+                docker container inspect "$backup" >/dev/null 2>&1 && die 'Un ancien conteneur de secours existe déjà ; vérifier la migration précédente.'
+                [[ $(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/mysql"}}{{.Name}}{{end}}{{end}}' "$container") == "$volume" ]] || die 'Volume du conteneur DB inattendu ; aucune migration effectuée.'
+                GAME_DB_MIGRATING=1
+                docker stop "$container" >/dev/null
+                docker rename "$container" "$backup"
+                info 'Passage de la DB des jeux de 3307 à 3306 ; données et image conservées.';;
+            *) die "Publication DB inattendue : $binding. Aucun changement effectué.";;
+        esac
+    fi
+    if ! docker container inspect "$container" >/dev/null 2>&1; then
+        game_db_port_available "$GAME_DB_GATEWAY" || die "Le port $GAME_DB_GATEWAY:3306 est déjà occupé. L’écoute 127.0.0.1:3306 du Panel est autorisée."
+        if docker container inspect "$backup" >/dev/null 2>&1; then
+            [[ $(docker inspect --format '{{index .Config.Labels "io.ptero-installer.managed"}}' "$backup") == game-db ]] || die 'Conteneur de secours étranger.'
+            [[ $(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/mysql"}}{{.Name}}{{end}}{{end}}' "$backup") == "$volume" ]] || die 'Volume de secours inattendu.'
+            image=$(docker inspect --format '{{.Image}}' "$backup")
+            GAME_DB_MIGRATING=1
+        fi
         docker run -d --name "$container" --restart unless-stopped \
             --label io.ptero-installer.managed=game-db --label "io.ptero-installer.gateway=$GAME_DB_GATEWAY" \
             --env-file "$envfile" --network "$GAME_DB_NETWORK" \
-            --publish "$GAME_DB_GATEWAY:3307:3306/tcp" --volume "$volume:/var/lib/mysql" \
-            mariadb:11.4 >/dev/null
+            --publish "$GAME_DB_GATEWAY:3306:3306/tcp" --volume "$volume:/var/lib/mysql" \
+            "$image" >/dev/null
     fi
     for attempt in {1..30}; do
         if docker exec "$container" healthcheck.sh --connect --innodb_initialized >/dev/null 2>&1; then ready=1; break; fi
@@ -1180,24 +1231,39 @@ require 'vendor/autoload.php';
 $app = require 'bootstrap/app.php';
 $app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
 $node = Pterodactyl\Models\Node::where('uuid', getenv('GAME_DB_NODE_UUID'))->firstOrFail();
-$host = Pterodactyl\Models\DatabaseHost::where('host', getenv('GAME_DB_GATEWAY'))->where('port', 3307)->first();
+$hosts = Pterodactyl\Models\DatabaseHost::where('host', getenv('GAME_DB_GATEWAY'))->whereIn('port', [3306, 3307])->get();
+if ($hosts->count() > 1) {
+    throw new RuntimeException('Plusieurs hôtes DB existent sur cette adresse : vérifier avant migration.');
+}
+$host = $hosts->first();
 if ($host) {
     if ($host->username !== 'ptero_games' || $host->node_id !== $node->id ||
         $app->make(Illuminate\Contracts\Encryption\Encrypter::class)->decrypt($host->password) !== getenv('GAME_DB_PASSWORD')) {
         throw new RuntimeException('Hôte DB existant différent : arrêt sans modification.');
     }
+    if ($host->port !== 3306) {
+        $host->port = 3306;
+        $app->make(Pterodactyl\Extensions\DynamicDatabaseConnection::class)->set('dynamic', $host);
+        $app->make(Illuminate\Database\DatabaseManager::class)->connection('dynamic')->select('SELECT 1');
+        $host->save(); // Préserve l'identifiant et les bases déjà rattachées.
+    }
 } else {
     $app->make(Pterodactyl\Services\Databases\Hosts\HostCreationService::class)->handle([
-        'name' => 'MariaDB jeux - ' . $node->name, 'host' => getenv('GAME_DB_GATEWAY'), 'port' => 3307,
+        'name' => 'MariaDB jeux - ' . $node->name, 'host' => getenv('GAME_DB_GATEWAY'), 'port' => 3306,
         'username' => 'ptero_games', 'password' => getenv('GAME_DB_PASSWORD'), 'node_id' => $node->id,
     ]);
 }
 PHP
     )
+    GAME_DB_MIGRATING=0
+    if docker container inspect "$backup" >/dev/null 2>&1; then
+        [[ $(docker inspect --format '{{index .Config.Labels "io.ptero-installer.managed"}}' "$backup") == game-db ]] || die 'Conteneur de secours étranger.'
+        docker rm "$backup" >/dev/null # Sans -v : le volume nommé reste intact.
+    fi
     unset GAME_DB_PASSWORD
     repair_panel_runtime_permissions
     touch "$STATE_DIR/game-db.done"
-    ok "MariaDB jeux ajoutée au Panel : $GAME_DB_GATEWAY:3307. Volume : $volume."
+    ok "MariaDB jeux ajoutée au Panel : $GAME_DB_GATEWAY:3306. Volume : $volume."
     info 'Dans le Panel, attribuer une limite de bases supérieure à 0 au serveur, puis utiliser son onglet Databases.'
 }
 
@@ -1495,7 +1561,9 @@ summary() {
         printf 'Docker publie les ports des conteneurs en contournant UFW : filtrer via DOCKER-USER ou le pare-feu hébergeur.\n'
     fi
     if [[ -f $STATE_DIR/game-db.done ]]; then
-        printf 'DB Panel : 127.0.0.1:3306 ; DB jeux : passerelle Docker:3307 → conteneur:3306 (instances séparées).\n'
+        local db_binding
+        db_binding=$(docker inspect --format '{{range index .HostConfig.PortBindings "3306/tcp"}}{{.HostIp}}:{{.HostPort}}{{end}}' ptero-installer-game-db 2>/dev/null) || db_binding='à vérifier'
+        printf 'DB Panel : 127.0.0.1:3306 ; DB jeux : %s → conteneur:3306 (IP et instances séparées).\n' "$db_binding"
     fi
     if [[ $SSL == le ]]; then
         printf 'Renouvellement : certbot.timer ; test conseillé : sudo certbot renew --dry-run\n'

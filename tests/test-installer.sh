@@ -12,6 +12,17 @@ TMP=$(mktemp -d /tmp/ptero-install.XXXXXXXX)
 STATE_DIR=$TMP/state
 mkdir -m 700 "$STATE_DIR"
 
+# Appel indirect par la fonction chargée depuis install.sh.
+# shellcheck disable=SC2329
+ss() { printf 'LISTEN 0 128 %s 0.0.0.0:*\n' "$TEST_DB_LISTENER"; }
+for TEST_DB_LISTENER in 127.0.0.1:3306 10.0.0.5:3306; do
+    game_db_port_available 172.18.0.1
+done
+for TEST_DB_LISTENER in 172.18.0.1:3306 0.0.0.0:3306 '[::]:3306' '*:3306' ':::3306' '[::ffff:172.18.0.1]:3306'; do
+    if game_db_port_available 172.18.0.1; then exit 1; fi
+done
+printf 'PASS shared 3306 on distinct IPs; wildcard and gateway conflicts rejected\n'
+
 for selection in all none minecraft minecraft,source bedrock,rust,fivem,valheim,terraria,factorio,zomboid,ark; do
     valid_game_port_selection "$selection"
 done
@@ -196,13 +207,25 @@ docker() {
         volume:inspect)
             if [[ $3 == --format ]]; then printf 'game-db\n'; else [[ -f $TMP/volume-created ]]; fi;;
         volume:create) touch "$TMP/volume-created";;
-        container:inspect) [[ -f $TMP/container-created ]];;
+        container:inspect)
+            if [[ $3 == *port-backup ]]; then [[ -f $TMP/backup-created ]]; else [[ -f $TMP/container-created ]]; fi;;
         inspect:--format)
-            if [[ $3 == *gateway* ]]; then printf '172.18.0.1\n'; else printf 'game-db\n'; fi;;
+            if [[ $3 == *PortBindings* ]]; then
+                printf '172.18.0.1:%s\n' "$(cat "$TMP/container-created")"
+            elif [[ $3 == *gateway* ]]; then printf '172.18.0.1\n'
+            elif [[ $3 == *Mounts* ]]; then printf 'ptero-installer-game-db\n'
+            elif [[ $3 == *Image* ]]; then printf 'sha256:original-db-image\n'
+            else printf 'game-db\n'; fi;;
         run:-d)
             printf '%s\n' "$*" >> "$TMP/db-runs"
-            touch "$TMP/container-created";;
+            printf '3306\n' > "$TMP/container-created";;
         start:*) :;;
+        stop:*) :;;
+        rename:*)
+            if [[ $2 == *port-backup ]]; then mv "$TMP/backup-created" "$TMP/container-created"
+            else mv "$TMP/container-created" "$TMP/backup-created"; fi;;
+        rm:*)
+            if [[ $2 == *port-backup ]]; then rm "$TMP/backup-created"; else rm "$TMP/container-created"; fi;;
         exec:-i) cat > "$TMP/generated-game-sql";;
         exec:*) :;;
         *) die "Commande Docker inattendue : $*";;
@@ -211,11 +234,23 @@ docker() {
 configure_game_databases
 configure_game_databases
 [[ $(wc -l < "$TMP/db-runs") == 1 && -f $STATE_DIR/game-db.done ]]
-grep -Fq -- '--publish 172.18.0.1:3307:3306/tcp' "$TMP/db-runs"
+grep -Fq -- '--publish 172.18.0.1:3306:3306/tcp' "$TMP/db-runs"
 grep -Fq -- '--restart unless-stopped' "$TMP/db-runs"
 grep -Fq 'mariadb:11.4' "$TMP/db-runs"
 grep -Fq HostCreationService "$TMP/php-host-request"
 grep -Fq "'ptero_games'@'%'" "$TMP/generated-game-sql"
 [[ ! -v GAME_DB_PASSWORD ]]
 printf 'PASS dedicated game DB: private bridge binding, persistent storage, registration, reuse, secret unset\n'
+
+printf '3307\n' > "$TMP/container-created"
+configure_game_databases
+[[ $(wc -l < "$TMP/db-runs") == 2 && $(cat "$TMP/container-created") == 3306 ]]
+[[ -f $TMP/volume-created && ! -f $TMP/backup-created ]]
+grep -Fq 'sha256:original-db-image' "$TMP/db-runs"
+printf 'PASS migration 3307 to 3306 preserves volume and image\n'
+
+printf '3307\n' > "$TMP/backup-created"
+restore_game_db_container
+[[ $(cat "$TMP/container-created") == 3307 && ! -f $TMP/backup-created && -f $TMP/volume-created ]]
+printf 'PASS failed migration can restore previous container without deleting the volume\n'
 PANEL=0

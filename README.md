@@ -38,9 +38,11 @@ L’option **4** prépare les DB des jeux sur une machine avec Panel + Wings dé
 bash <(curl -fsSL https://raw.githubusercontent.com/ZertoxUnder/Pterodactyl-Installer/main/install.sh) --configure-databases
 ```
 
-Elle crée une instance MariaDB Docker séparée, un volume persistant et un hôte DB dans le Panel. Le port 3307 est lié à la passerelle privée du réseau Wings. Attribuez ensuite une limite de bases supérieure à 0 à vos serveurs dans le Panel.
+Elle crée une instance MariaDB Docker séparée, un volume persistant et un hôte DB dans le Panel. Le port **3306** est lié à la passerelle privée du réseau Wings. Attribuez ensuite une limite de bases supérieure à 0 à vos serveurs dans le Panel.
 
-**Pourquoi 3307 ?** Le Panel utilise déjà MariaDB sur 3306. La DB des jeux utilise 3307 côté machine pour séparer les instances ; dans son conteneur, elle reste sur 3306.
+Les deux DB utilisent **3306 sur des IP distinctes** : `127.0.0.1:3306` pour le Panel et la passerelle Docker (par exemple `172.18.0.1:3306`) pour les jeux. Une écoute existante sur toutes les interfaces est détectée comme conflit.
+
+Pour une ancienne instance créée en 3307, relancez l’option **4** : le conteneur et l’hôte DB passent en 3306, avec le même volume et les bases conservées. Les configurations de jeux qui indiquaient explicitement 3307 doivent aussi être adaptées.
 
 L’option **5** ajoute les ports à une installation existante (ou utilisez `--configure-ports` avec la commande curl). Par défaut : Minecraft Java `25565–25574/TCP`, Bedrock `19132–19141/UDP`, GMod/Source `27015–27024/UDP`, FiveM `30120–30124/TCP+UDP`, et les ports des autres jeux listés plus haut. Les allocations déjà présentes sont conservées ; aucun serveur de jeu n’est créé.
 
