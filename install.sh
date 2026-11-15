@@ -99,20 +99,13 @@ warn() { ui_message ATTENTION "$YELLOW" "$*"; }
 die() { ui_message ERREUR "$RED" "$*" >&2; exit 1; }
 ui_error() { ui_message ERREUR "$RED" "Échec ligne $1 (code $2) · $STAGE" >&2; }
 ui_preview() {
-    ui_banner
-    ui_section 'APERÇU · aucune installation'
-    ui_option 1 'Panel' 'Interface web et administrateur'
-    ui_option 2 'Wings' 'Nœud pour les serveurs de jeux'
-    ui_option 3 'Panel + Wings' 'Installation complète'
+    printf '\n  %sPTERO VIBE · APERÇU%s\n\n' "$BOLD$PURPLE" "$RESET"
+    ui_option 1 'Panel'
+    ui_option 2 'Wings'
+    ui_option 3 'Panel + Wings'
     printf '\n'
-    info 'Préparation des dépendances…'
-    ok 'Panel configuré · exemple de message de réussite'
-    warn 'SMTP non configuré · exemple de point à compléter'
-    ui_section 'Exemple de récapitulatif' "$GREEN"
-    ui_kv 'Panel' 'http://203.0.113.10'
-    ui_kv 'Wings' '203.0.113.10:8080'
-    ui_kv 'Base de données' '172.18.0.1:3306'
-    info 'Démonstration terminée : aucun paquet, service ou fichier système modifié.'
+    ok 'Exemple : Panel prêt.'
+    info 'Aperçu uniquement : aucun paquet, service ou fichier système modifié.'
 }
 cleanup() {
     local status=$?
